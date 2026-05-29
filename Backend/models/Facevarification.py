@@ -11,3 +11,5 @@ class FaceVerification(Base):
     verified = Column(String)
 
     confidence = Column(Integer)
+
+print("succsessfully created face verification model")  

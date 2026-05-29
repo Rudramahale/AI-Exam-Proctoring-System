@@ -10,3 +10,5 @@ class Exam(Base):
     total_marks = Column(Integer, nullable = False)
     owner = Column(Integer, ForeignKey("students.id"))
 
+print("succsessfully created exam model")
+

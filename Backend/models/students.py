@@ -1,4 +1,5 @@
 from sqlalchemy import Integer, String, Column 
+from sqlalchemy.orm import relationship
 from database.connection import Base 
 
 class Student(Base):
@@ -9,4 +10,6 @@ class Student(Base):
     email = Column(String, nullable = False, unique = True)
     password = Column(String, nullable = False)
     face_image = Column(String, nullable=True)
-    
+    Exam = relationship('exam', back_populates = 'Student')
+
+print("succsessfully created Student model")

@@ -9,3 +9,5 @@ class Admin(Base):
     username = Column(String, unique=True)
 
     password = Column(String)
+
+print("succsessfully created admin model")

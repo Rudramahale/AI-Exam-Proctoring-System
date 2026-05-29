@@ -20,3 +20,5 @@ class Violation(Base):
 # FACE_NOT_VISIBLE
 # TAB_SWITCH
 # HEAD_MOVEMENT
+
+print("succsessfully created violation model")

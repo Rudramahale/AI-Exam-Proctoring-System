@@ -12,3 +12,5 @@ class ActivityLog(Base):
     activity = Column(String)
 
     timestamp = Column(DateTime, default=datetime.utcnow)
+
+print("succsessfully created activity log model")

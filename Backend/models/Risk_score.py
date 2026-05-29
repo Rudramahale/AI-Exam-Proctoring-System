@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, ForeignKey
+from sqlalchemy import Column, Integer, ForeignKey, String
 from database.connection import Base
 
 class RiskScore(Base):
@@ -11,3 +11,5 @@ class RiskScore(Base):
     score = Column(Integer)
 
     risk_level = Column(String)
+
+print("succsessfully created risk score model")

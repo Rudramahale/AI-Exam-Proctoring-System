@@ -18,3 +18,5 @@ class ExamSession(Base):
 # 0-30   = LOW
 # 31-70  = MEDIUM
 # 71-100 = HIGH
+
+print("succsessfully created exam session model")

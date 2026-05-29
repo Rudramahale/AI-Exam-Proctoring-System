@@ -9,3 +9,5 @@ class Report(Base):
     session_id = Column(Integer, ForeignKey("exam_sessions.id"))
 
     pdf_path = Column(String)
+
+print("succsessfully created report model")

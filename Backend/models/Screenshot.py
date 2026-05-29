@@ -11,3 +11,5 @@ class Screenshot(Base):
     image_path = Column(String)
 
     violation_type = Column(String)
+
+print("succsessfully created screenshot model")

@@ -8,5 +8,5 @@ class Student(Base):
     name = Column(String, nullable = False)
     email = Column(String, nullable = False, unique = True)
     password = Column(String, nullable = False)
-
+    face_image = Column(String, nullable=True)
     

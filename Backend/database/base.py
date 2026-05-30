@@ -8,7 +8,7 @@ from models.Screenshot import Screenshot
 from models.Exam_session import ExamSession
 from models.Report import Report
 from models.Activity_log import ActivityLog
-from models.user_model import user
+from models.user_model import User
 from models.Risk_score import RiskScore
 from models.Exam_session import ExamSession
 

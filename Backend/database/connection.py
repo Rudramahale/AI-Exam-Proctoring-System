@@ -11,7 +11,7 @@ engine = create_engine(
     echo = True
 )
 
-Session = sessionmaker(
+SessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,    
     bind = engine

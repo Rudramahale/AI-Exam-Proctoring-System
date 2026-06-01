@@ -115,10 +115,37 @@ function App() {
   const [resultScore, setResultScore] = useState(0);
   const [fullscreenWarning, setFullscreenWarning] = useState(false);
   const [submissionComplete, setSubmissionComplete] = useState(false);
+  const [warnings, setWarnings] = useState(0);
+  const [violations, setViolations] = useState([]);
+  const [activeWarningMessage, setActiveWarningMessage] = useState('');
+  const [showWarningModal, setShowWarningModal] = useState(false);
+  const [lastTabChangeTime, setLastTabChangeTime] = useState(0);
 
   const videoRef = useRef(null);
   const hiddenCanvasRef = useRef(null);
   const streamRef = useRef(null);
+  const monitoringIntervalRef = useRef(null);
+
+  const addViolation = (type, message) => {
+    const now = Date.now();
+    const timestamp = new Date().toISOString();
+
+    const violation = {
+      id: `${type}_${now}`,
+      type,
+      message,
+      timestamp,
+    };
+
+    setViolations((prev) => [...prev, violation]);
+    setWarnings((prev) => prev + 1);
+    setActiveWarningMessage(message);
+    setShowWarningModal(true);
+
+    setTimeout(() => {
+      setShowWarningModal(false);
+    }, 5000);
+  };
 
   useEffect(() => {
     return () => {
@@ -146,18 +173,34 @@ function App() {
     const handleFullscreenChange = () => {
       const isFullscreen = !!document.fullscreenElement;
       setFullscreenWarning(!isFullscreen);
+
+      if (!isFullscreen) {
+        addViolation('fullscreen_exit', 'Fullscreen exited. Please return to fullscreen mode.');
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        const now = Date.now();
+        if (now - lastTabChangeTime > 500) {
+          addViolation('tab_switch', 'Tab switch detected. Please return to the exam tab.');
+          setLastTabChangeTime(now);
+        }
+      }
     };
 
     document.addEventListener('keydown', handleKeyDown);
     document.addEventListener('contextmenu', handleContextMenu);
     document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
       document.removeEventListener('contextmenu', handleContextMenu);
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [screen]);
+  }, [screen, lastTabChangeTime]);
 
   useEffect(() => {
     if (screen !== 'exam' || submissionComplete) {
@@ -178,6 +221,48 @@ function App() {
       clearInterval(interval);
     };
   }, [screen, submissionComplete]);
+
+  useEffect(() => {
+    if (screen !== 'exam') {
+      if (monitoringIntervalRef.current) {
+        clearInterval(monitoringIntervalRef.current);
+        monitoringIntervalRef.current = null;
+      }
+      return undefined;
+    }
+
+    monitoringIntervalRef.current = setInterval(() => {
+      if (!videoRef.current || !hiddenCanvasRef.current) {
+        return;
+      }
+
+      const video = videoRef.current;
+      const canvas = hiddenCanvasRef.current;
+      const ctx = canvas.getContext('2d');
+
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const image = canvas.toDataURL('image/jpeg', 0.7);
+
+      const payload = {
+        timestamp: new Date().toISOString(),
+        type: 'monitoring_frame',
+        image,
+      };
+
+      console.log('📸 Photo captured at:', payload.timestamp);
+      console.log(payload);
+    }, 3000);
+
+    return () => {
+      if (monitoringIntervalRef.current) {
+        clearInterval(monitoringIntervalRef.current);
+        monitoringIntervalRef.current = null;
+      }
+    };
+  }, [screen]);
 
   const requestCamera = async () => {
     setCameraError('');
@@ -319,6 +404,35 @@ function App() {
     link.download = 'exam-report.json';
     link.click();
     URL.revokeObjectURL(url);
+  };
+
+  const renderWarningModal = () => {
+    if (!showWarningModal) {
+      return null;
+    }
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-6 backdrop-blur-sm pointer-events-auto">
+        <div className="w-full max-w-sm rounded-3xl border border-amber-500/30 bg-amber-950/95 p-8 shadow-[0_30px_90px_rgba(0,0,0,0.6)]">
+          <div className="flex items-center gap-4">
+            <span className="inline-flex h-12 w-12 items-center justify-center rounded-full bg-amber-500/20 text-2xl">
+              ⚠️
+            </span>
+            <div>
+              <h3 className="text-lg font-semibold text-amber-100">Warning {warnings}</h3>
+              <p className="text-sm text-amber-300">{activeWarningMessage}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowWarningModal(false)}
+            className="mt-6 w-full rounded-2xl bg-amber-500 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-amber-400"
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+    );
   };
 
   const renderLoginScreen = () => {
@@ -568,11 +682,32 @@ function App() {
           <aside className="space-y-6 rounded-[2rem] border border-slate-800/80 bg-slate-950/85 p-6 shadow-[0_30px_80px_rgba(0,0,0,0.35)]">
             <div className="rounded-3xl border border-cyan-500/15 bg-slate-900/80 p-5">
               <p className="text-xs uppercase tracking-[0.3em] text-cyan-300">Monitoring Status</p>
-              <div className="mt-4 rounded-3xl bg-slate-950/90 p-4 text-slate-300">
-                <p className="text-sm font-semibold text-slate-100">You are being monitored</p>
-                <p className="mt-2 text-sm leading-6 text-slate-400">
-                  This session includes persistent webcam monitoring and live time tracking for exam integrity.
-                </p>
+              <div className="mt-4 rounded-3xl bg-slate-950/90 p-4 text-slate-300 space-y-3">
+                <div>
+                  <p className="text-sm font-semibold text-slate-100">You are being monitored</p>
+                  <p className="mt-2 text-sm leading-6 text-slate-400">
+                    This session includes persistent webcam monitoring and live time tracking for exam integrity.
+                  </p>
+                </div>
+                <div className="pt-3 border-t border-slate-700/50 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-slate-400">Warnings:</span>
+                    <span className={`text-sm font-semibold ${warnings > 0 ? 'text-amber-300' : 'text-emerald-300'}`}>
+                      {warnings}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-slate-400">Monitoring Active:</span>
+                    <span className="inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                  </div>
+                  {violations.length > 0 && (
+                    <div className="pt-2 border-t border-slate-700/50">
+                      <p className="text-xs text-slate-500 mb-1">Last Violation:</p>
+                      <p className="text-xs text-slate-400">{violations[violations.length - 1].message}</p>
+                      <p className="text-xs text-slate-500 mt-1">{formatDateTime(violations[violations.length - 1].timestamp)}</p>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -600,18 +735,18 @@ function App() {
           </aside>
         </main>
 
-        <div className="pointer-events-none fixed bottom-6 right-6 z-40 w-[320px] rounded-3xl border border-cyan-500/15 bg-slate-950/95 p-4 shadow-[0_20px_70px_rgba(0,0,0,0.45)] backdrop-blur-sm">
+        <div className="pointer-events-none fixed top-6 right-6 z-40 w-[320px] rounded-3xl border border-cyan-500/15 bg-slate-950/95 p-4 shadow-[0_20px_70px_rgba(0,0,0,0.45)] backdrop-blur-sm">
           <div className="relative overflow-hidden rounded-3xl border border-slate-800 bg-slate-900 py-3 px-3">
             {webcamActive ? (
               <video
                 ref={videoRef}
                 autoPlay
-                muted
                 playsInline
-                className="h-48 w-full rounded-3xl object-cover"
+                muted
+                className="w-48 h-36 rounded-lg border-2 border-green-500 object-cover"
               />
             ) : (
-              <div className="flex h-48 items-center justify-center text-slate-500">Webcam feed unavailable</div>
+              <div className="flex h-36 items-center justify-center text-slate-500">Webcam feed unavailable</div>
             )}
             <div className="mt-3 rounded-2xl bg-slate-950/90 px-3 py-2 text-sm text-slate-200">
               <span className="font-semibold text-cyan-300">Live Feed</span> — persistent monitoring active.
@@ -645,6 +780,8 @@ function App() {
             </div>
           </div>
         )}
+
+        {renderWarningModal()}
       </div>
     );
   };

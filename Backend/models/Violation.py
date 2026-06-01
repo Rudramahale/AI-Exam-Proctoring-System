@@ -9,7 +9,7 @@ class Violation(Base):
 
     session_id = Column(Integer, ForeignKey("exam_sessions.id"))
 
-    violation_type = Column(String)
+    violation_id = Column(Integer)
 
     confidence = Column(Integer)
 

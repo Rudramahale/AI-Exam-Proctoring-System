@@ -87,6 +87,8 @@ const formatDateTime = (value) => {
   });
 };
 
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+
 const getDuration = (start, end) => {
   const diff = Math.max(0, new Date(end) - new Date(start));
   const minutes = Math.floor(diff / 60000);
@@ -95,11 +97,18 @@ const getDuration = (start, end) => {
 };
 
 function App() {
-  const [screen, setScreen] = useState('login');
+  const [screen, setScreen] = useState('auth');
+  const [authMode, setAuthMode] = useState('login');
+  const [authToken, setAuthToken] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [sessionId, setSessionId] = useState(null);
+  const [submitLoading, setSubmitLoading] = useState(false);
   const [student, setStudent] = useState({
     name: '',
     studentId: '',
     email: '',
+    password: '',
     photo: '',
     loginTime: '',
   });
@@ -115,42 +124,23 @@ function App() {
   const [resultScore, setResultScore] = useState(0);
   const [fullscreenWarning, setFullscreenWarning] = useState(false);
   const [submissionComplete, setSubmissionComplete] = useState(false);
-  const [warnings, setWarnings] = useState(0);
-  const [violations, setViolations] = useState([]);
-  const [activeWarningMessage, setActiveWarningMessage] = useState('');
-  const [showWarningModal, setShowWarningModal] = useState(false);
-  const [lastTabChangeTime, setLastTabChangeTime] = useState(0);
+  const [frameCaptureLogs, setFrameCaptureLogs] = useState([]);
 
   const videoRef = useRef(null);
   const hiddenCanvasRef = useRef(null);
   const streamRef = useRef(null);
-  const monitoringIntervalRef = useRef(null);
-
-  const addViolation = (type, message) => {
-    const now = Date.now();
-    const timestamp = new Date().toISOString();
-
-    const violation = {
-      id: `${type}_${now}`,
-      type,
-      message,
-      timestamp,
-    };
-
-    setViolations((prev) => [...prev, violation]);
-    setWarnings((prev) => prev + 1);
-    setActiveWarningMessage(message);
-    setShowWarningModal(true);
-
-    setTimeout(() => {
-      setShowWarningModal(false);
-    }, 5000);
-  };
+  const frameCaptureIntervalRef = useRef(null);
 
   useEffect(() => {
     return () => {
+      // Clean up media stream
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop());
+      }
+      // Clean up frame capture interval
+      if (frameCaptureIntervalRef.current) {
+        clearInterval(frameCaptureIntervalRef.current);
+        frameCaptureIntervalRef.current = null;
       }
     };
   }, []);
@@ -173,34 +163,18 @@ function App() {
     const handleFullscreenChange = () => {
       const isFullscreen = !!document.fullscreenElement;
       setFullscreenWarning(!isFullscreen);
-
-      if (!isFullscreen) {
-        addViolation('fullscreen_exit', 'Fullscreen exited. Please return to fullscreen mode.');
-      }
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') {
-        const now = Date.now();
-        if (now - lastTabChangeTime > 500) {
-          addViolation('tab_switch', 'Tab switch detected. Please return to the exam tab.');
-          setLastTabChangeTime(now);
-        }
-      }
     };
 
     document.addEventListener('keydown', handleKeyDown);
     document.addEventListener('contextmenu', handleContextMenu);
     document.addEventListener('fullscreenchange', handleFullscreenChange);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
       document.removeEventListener('contextmenu', handleContextMenu);
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [screen, lastTabChangeTime]);
+  }, [screen]);
 
   useEffect(() => {
     if (screen !== 'exam' || submissionComplete) {
@@ -222,47 +196,29 @@ function App() {
     };
   }, [screen, submissionComplete]);
 
+  // Frame capture effect - captures and sends frame every 3 seconds during exam
   useEffect(() => {
-    if (screen !== 'exam') {
-      if (monitoringIntervalRef.current) {
-        clearInterval(monitoringIntervalRef.current);
-        monitoringIntervalRef.current = null;
+    if (screen !== 'exam' || submissionComplete || !webcamActive || !sessionId) {
+      // Stop frame capture when exam ends
+      if (frameCaptureIntervalRef.current) {
+        clearInterval(frameCaptureIntervalRef.current);
+        frameCaptureIntervalRef.current = null;
       }
       return undefined;
     }
 
-    monitoringIntervalRef.current = setInterval(() => {
-      if (!videoRef.current || !hiddenCanvasRef.current) {
-        return;
-      }
-
-      const video = videoRef.current;
-      const canvas = hiddenCanvasRef.current;
-      const ctx = canvas.getContext('2d');
-
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 480;
-
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const image = canvas.toDataURL('image/jpeg', 0.7);
-
-      const payload = {
-        timestamp: new Date().toISOString(),
-        type: 'monitoring_frame',
-        image,
-      };
-
-      console.log('📸 Photo captured at:', payload.timestamp);
-      console.log(payload);
+    // Start frame capture interval (every 3 seconds)
+    frameCaptureIntervalRef.current = setInterval(() => {
+      captureAndSendFrame();
     }, 3000);
 
     return () => {
-      if (monitoringIntervalRef.current) {
-        clearInterval(monitoringIntervalRef.current);
-        monitoringIntervalRef.current = null;
+      if (frameCaptureIntervalRef.current) {
+        clearInterval(frameCaptureIntervalRef.current);
+        frameCaptureIntervalRef.current = null;
       }
     };
-  }, [screen]);
+  }, [screen, submissionComplete, webcamActive, sessionId]);
 
   const requestCamera = async () => {
     setCameraError('');
@@ -297,6 +253,142 @@ function App() {
     setStudent((prev) => ({ ...prev, photo: photoData }));
   };
 
+  const dataURLToFile = (dataUrl, fileName) => {
+    const arr = dataUrl.split(',');
+    const mime = arr[0].match(/:(.*?);/)[1];
+    const bstr = atob(arr[1]);
+    let n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    while (n--) {
+      u8arr[n] = bstr.charCodeAt(n);
+    }
+    return new File([u8arr], fileName, { type: mime });
+  };
+
+  const handleAuth = async () => {
+    setAuthLoading(true);
+    setAuthError('');
+
+    if (!student.email.trim() || !student.password.trim() || (authMode === 'signup' && !student.name.trim())) {
+      setAuthError('Please fill in all required fields.');
+      setAuthLoading(false);
+      return;
+    }
+
+    const url = `${API_BASE}/${authMode === 'signup' ? 'signup' : 'login'}`;
+    const payload = {
+      email: student.email,
+      password: student.password,
+    };
+
+    if (authMode === 'signup') {
+      payload.name = student.name;
+    }
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        setAuthError(data.detail || 'Unable to authenticate.');
+        return;
+      }
+
+      setAuthToken(data.access_token);
+      setStudent((prev) => ({
+        ...prev,
+        studentId: data.user_id ? String(data.user_id) : prev.studentId,
+      }));
+      setScreen('verify');
+      setAuthError('');
+      setLoginError('');
+    } catch (error) {
+      setAuthError('Unable to reach the backend. Please try again.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const captureAndSendFrame = async () => {
+    if (!videoRef.current || !hiddenCanvasRef.current || !sessionId) {
+      return;
+    }
+
+    try {
+      const video = videoRef.current;
+      const canvas = hiddenCanvasRef.current;
+      
+      // Set canvas dimensions to match video
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      
+      const context = canvas.getContext('2d');
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      
+      // Convert canvas to blob
+      canvas.toBlob(async (blob) => {
+        if (!blob) {
+          console.error('Failed to create blob from canvas');
+          return;
+        }
+
+        try {
+          const formData = new FormData();
+          formData.append('frame', blob, 'frame.jpg');
+          formData.append('session_id', sessionId);
+          formData.append('student_id', student.studentId);
+          formData.append('timestamp', new Date().toISOString());
+
+          const response = await fetch(`${API_BASE}/monitor-frame`, {
+            method: 'POST',
+            body: formData,
+            headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+          });
+
+          if (!response.ok) {
+            const error = await response.json();
+            console.error('Frame upload failed:', error.detail || error);
+            setFrameCaptureLogs((prev) => [
+              ...prev.slice(-9),
+              {
+                timestamp: new Date().toLocaleTimeString(),
+                status: 'failed',
+                message: error.detail || 'Upload failed',
+              },
+            ]);
+          } else {
+            setFrameCaptureLogs((prev) => [
+              ...prev.slice(-9),
+              {
+                timestamp: new Date().toLocaleTimeString(),
+                status: 'success',
+                message: 'Frame uploaded',
+              },
+            ]);
+          }
+        } catch (error) {
+          console.error('Error sending frame:', error);
+          setFrameCaptureLogs((prev) => [
+            ...prev.slice(-9),
+            {
+              timestamp: new Date().toLocaleTimeString(),
+              status: 'error',
+              message: error.message,
+            },
+          ]);
+        }
+      }, 'image/jpeg', 0.8);
+    } catch (error) {
+      console.error('Error capturing frame:', error);
+    }
+  };
+
   const validateLogin = () => {
     if (!student.name.trim() || !student.studentId.trim() || !student.email.trim()) {
       setLoginError('All fields are required before starting the exam.');
@@ -306,6 +398,11 @@ function App() {
     const emailIsValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(student.email);
     if (!emailIsValid) {
       setLoginError('Enter a valid email address.');
+      return false;
+    }
+
+    if (Number.isNaN(Number(student.studentId))) {
+      setLoginError('Student ID must be a numeric database ID before starting the exam.');
       return false;
     }
 
@@ -323,22 +420,79 @@ function App() {
     return true;
   };
 
-  const startExam = () => {
+  const handleStartExam = async () => {
     if (!validateLogin()) {
       return;
     }
 
-    const startTime = new Date();
-    const formatted = formatDateTime(startTime);
-    setStudent((prev) => ({ ...prev, loginTime: formatted }));
-    setExamStartTime(startTime.toISOString());
-    setSecondsLeft(15 * 60);
-    setFullscreenWarning(false);
-    setScreen('exam');
+    if (!student.photo) {
+      setLoginError('Please capture a photo before starting the exam.');
+      return;
+    }
 
-    document.documentElement.requestFullscreen().catch(() => {
-      setFullscreenWarning(true);
-    });
+    setSubmitLoading(true);
+    setLoginError('');
+
+    try {
+      const formData = new FormData();
+      formData.append('id', Number(student.studentId));
+      formData.append('student_name', student.name);
+      formData.append('photo', dataURLToFile(student.photo, `student-${student.studentId}.jpg`));
+
+      const response = await fetch(`${API_BASE}/start-exam`, {
+        method: 'POST',
+        body: formData,
+        headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        setLoginError(data.detail || 'Unable to start exam.');
+        return;
+      }
+
+      setSessionId(data.session_id);
+      setExamStartTime(data.start_time);
+      const formatted = formatDateTime(new Date(data.start_time));
+      setStudent((prev) => ({ ...prev, loginTime: formatted }));
+      setSecondsLeft(15 * 60);
+      setFullscreenWarning(false);
+      setScreen('exam');
+
+      document.documentElement.requestFullscreen().catch(() => {
+        setFullscreenWarning(true);
+      });
+    } catch (error) {
+      setLoginError('Unable to reach the backend. Please try again.');
+    } finally {
+      setSubmitLoading(false);
+    }
+  };
+
+  const submitEndExam = async () => {
+    if (!sessionId) {
+      return { start_time: '', end_time: '' };
+    }
+
+    try {
+      const response = await fetch(`${API_BASE}/end-exam`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        return { start_time: data.start_time, end_time: data.end_time };
+      }
+    } catch (error) {
+      console.error('Error submitting exam:', error);
+    }
+    
+    return { start_time: '', end_time: '' };
   };
 
   const handleAnswerChange = (index) => {
@@ -355,22 +509,33 @@ function App() {
     }, 0);
   };
 
-  const handleFinalSubmission = (auto = false) => {
+  const handleFinalSubmission = async (auto = false) => {
     if (!auto && !showSubmitModal) {
       setShowSubmitModal(true);
       return;
     }
 
+    // Stop frame capture immediately
+    if (frameCaptureIntervalRef.current) {
+      clearInterval(frameCaptureIntervalRef.current);
+      frameCaptureIntervalRef.current = null;
+    }
+
     const finalScore = calculateScore();
     setResultScore(finalScore);
-    setExamEndTime(new Date().toISOString());
     setSubmissionComplete(true);
     setShowSubmitModal(false);
-    setScreen('result');
 
     if (document.fullscreenElement) {
       document.exitFullscreen().catch(() => {});
     }
+
+    // Call backend to record end time and get exam times
+    const examTimes = await submitEndExam();
+    setExamStartTime(examTimes.start_time);
+    setExamEndTime(examTimes.end_time);
+    
+    setScreen('result');
   };
 
   const downloadReport = () => {
@@ -406,44 +571,112 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
-  const renderWarningModal = () => {
-    if (!showWarningModal) {
-      return null;
-    }
-
+  const renderAuthScreen = () => {
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-6 backdrop-blur-sm pointer-events-auto">
-        <div className="w-full max-w-sm rounded-3xl border border-amber-500/30 bg-amber-950/95 p-8 shadow-[0_30px_90px_rgba(0,0,0,0.6)]">
-          <div className="flex items-center gap-4">
-            <span className="inline-flex h-12 w-12 items-center justify-center rounded-full bg-amber-500/20 text-2xl">
-              ⚠️
-            </span>
-            <div>
-              <h3 className="text-lg font-semibold text-amber-100">Warning {warnings}</h3>
-              <p className="text-sm text-amber-300">{activeWarningMessage}</p>
+      <div className="mx-auto flex w-full max-w-5xl flex-col gap-8 px-4 py-8 sm:px-6 lg:px-8">
+        <header className="rounded-3xl border border-cyan-500/20 bg-slate-900/80 p-8 shadow-[0_20px_70px_rgba(0,0,0,0.45)] backdrop-blur-sm">
+          <p className="text-cyan-300 uppercase tracking-[0.3em]">AI Exam Proctoring Portal</p>
+          <h1 className="mt-4 text-4xl font-semibold text-slate-50">{authMode === 'login' ? 'Login' : 'Create an account'}</h1>
+          <p className="mt-3 max-w-2xl text-slate-300">
+            {authMode === 'login'
+              ? 'Sign in with your email and password to access the exam verification flow.'
+              : 'Create an account to register for the AI proctored exam session.'}
+          </p>
+        </header>
+
+        <main className="grid gap-8 lg:grid-cols-[1.4fr_0.8fr]">
+          <section className="space-y-6 rounded-3xl border border-slate-800/80 bg-slate-900/80 p-8 shadow-lg shadow-slate-950/40">
+            {authMode === 'signup' && (
+              <div className="space-y-4">
+                <label className="block text-sm text-slate-300">Name</label>
+                <input
+                  type="text"
+                  value={student.name}
+                  onChange={(event) => setStudent((prev) => ({ ...prev, name: event.target.value }))}
+                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 outline-none ring-1 ring-slate-800 transition focus:border-cyan-400 focus:ring-cyan-500/50"
+                  placeholder="Jane Doe"
+                />
+              </div>
+            )}
+
+            <div className="space-y-4">
+              <label className="block text-sm text-slate-300">Email</label>
+              <input
+                type="email"
+                value={student.email}
+                onChange={(event) => setStudent((prev) => ({ ...prev, email: event.target.value }))}
+                className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 outline-none ring-1 ring-slate-800 transition focus:border-cyan-400 focus:ring-cyan-500/50"
+                placeholder="student@example.com"
+              />
             </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => setShowWarningModal(false)}
-            className="mt-6 w-full rounded-2xl bg-amber-500 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-amber-400"
-          >
-            Dismiss
-          </button>
-        </div>
+
+            <div className="space-y-4">
+              <label className="block text-sm text-slate-300">Password</label>
+              <input
+                type="password"
+                value={student.password}
+                onChange={(event) => setStudent((prev) => ({ ...prev, password: event.target.value }))}
+                className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 outline-none ring-1 ring-slate-800 transition focus:border-cyan-400 focus:ring-cyan-500/50"
+                placeholder="••••••••"
+              />
+            </div>
+
+            <button
+              type="button"
+              onClick={handleAuth}
+              className="w-full rounded-3xl bg-cyan-500 px-6 py-4 text-base font-semibold text-slate-950 transition hover:bg-cyan-400"
+              disabled={authLoading}
+            >
+              {authLoading ? 'Processing...' : authMode === 'login' ? 'Login' : 'Create account'}
+            </button>
+
+            {authError && <p className="text-sm text-rose-300">{authError}</p>}
+            <p className="text-sm text-slate-400">
+              {authMode === 'login' ? 'New to the exam portal?' : 'Already have an account?'}{' '}
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode(authMode === 'login' ? 'signup' : 'login');
+                  setAuthError('');
+                }}
+                className="font-semibold text-cyan-300 transition hover:text-cyan-200"
+              >
+                {authMode === 'login' ? 'Create one' : 'Sign in'}
+              </button>
+            </p>
+          </section>
+
+          <aside className="rounded-3xl border border-slate-800/80 bg-slate-950/80 p-8 shadow-[0_30px_70px_rgba(0,0,0,0.35)]">
+            <h2 className="text-xl font-semibold text-slate-100">Prepare for the exam</h2>
+            <p className="mt-4 text-slate-300">
+              After login or signup, proceed to verification where you will confirm your student ID, enable webcam monitoring, and begin the exam.
+            </p>
+            <div className="mt-6 space-y-4 rounded-3xl bg-slate-900/90 p-6">
+              <p className="text-sm uppercase tracking-[0.2em] text-cyan-300">What you need</p>
+              <ul className="space-y-3 text-slate-300">
+                <li className="flex items-start gap-3"><span className="mt-1 h-2.5 w-2.5 rounded-full bg-cyan-400" />Valid email and password</li>
+                <li className="flex items-start gap-3"><span className="mt-1 h-2.5 w-2.5 rounded-full bg-cyan-400" />Webcam access for identity verification</li>
+                <li className="flex items-start gap-3"><span className="mt-1 h-2.5 w-2.5 rounded-full bg-cyan-400" />Student ID for the exam session</li>
+              </ul>
+            </div>
+          </aside>
+        </main>
       </div>
     );
   };
 
-  const renderLoginScreen = () => {
+  const renderVerifyScreen = () => {
     return (
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 py-8 sm:px-6 lg:px-8">
         <header className="rounded-3xl border border-cyan-500/20 bg-slate-900/80 p-8 shadow-[0_20px_70px_rgba(0,0,0,0.45)] backdrop-blur-sm">
           <p className="text-cyan-300 uppercase tracking-[0.3em]">Phase 1 · AI Exam Proctoring</p>
           <h1 className="mt-4 text-4xl font-semibold text-slate-50">Candidate Verification</h1>
           <p className="mt-3 max-w-2xl text-slate-300">
-            Enter your credentials, verify your webcam, and capture your identity photo before starting the proctored assessment.
+            Enter your exam ID, confirm verification details, and start your proctored assessment.
           </p>
+          {authToken && student.email && (
+            <p className="mt-4 text-sm text-emerald-300">Signed in as {student.email}</p>
+          )}
         </header>
 
         <main className="grid gap-8 lg:grid-cols-[1.2fr_0.8fr]">
@@ -466,7 +699,7 @@ function App() {
                 value={student.studentId}
                 onChange={(event) => setStudent((prev) => ({ ...prev, studentId: event.target.value }))}
                 className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 outline-none ring-1 ring-slate-800 transition focus:border-cyan-400 focus:ring-cyan-500/50"
-                placeholder="STU-2024-001"
+                  placeholder="123"
               />
             </div>
 
@@ -523,10 +756,11 @@ function App() {
 
             <button
               type="button"
-              onClick={startExam}
+              onClick={handleStartExam}
               className="w-full rounded-3xl bg-cyan-500 px-6 py-4 text-base font-semibold text-slate-950 transition hover:bg-cyan-400"
+              disabled={submitLoading}
             >
-              Begin Exam
+              {submitLoading ? 'Starting exam...' : 'Begin Exam'}
             </button>
 
             {loginError && <p className="text-sm text-rose-300">{loginError}</p>}
@@ -682,32 +916,11 @@ function App() {
           <aside className="space-y-6 rounded-[2rem] border border-slate-800/80 bg-slate-950/85 p-6 shadow-[0_30px_80px_rgba(0,0,0,0.35)]">
             <div className="rounded-3xl border border-cyan-500/15 bg-slate-900/80 p-5">
               <p className="text-xs uppercase tracking-[0.3em] text-cyan-300">Monitoring Status</p>
-              <div className="mt-4 rounded-3xl bg-slate-950/90 p-4 text-slate-300 space-y-3">
-                <div>
-                  <p className="text-sm font-semibold text-slate-100">You are being monitored</p>
-                  <p className="mt-2 text-sm leading-6 text-slate-400">
-                    This session includes persistent webcam monitoring and live time tracking for exam integrity.
-                  </p>
-                </div>
-                <div className="pt-3 border-t border-slate-700/50 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-slate-400">Warnings:</span>
-                    <span className={`text-sm font-semibold ${warnings > 0 ? 'text-amber-300' : 'text-emerald-300'}`}>
-                      {warnings}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-slate-400">Monitoring Active:</span>
-                    <span className="inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                  </div>
-                  {violations.length > 0 && (
-                    <div className="pt-2 border-t border-slate-700/50">
-                      <p className="text-xs text-slate-500 mb-1">Last Violation:</p>
-                      <p className="text-xs text-slate-400">{violations[violations.length - 1].message}</p>
-                      <p className="text-xs text-slate-500 mt-1">{formatDateTime(violations[violations.length - 1].timestamp)}</p>
-                    </div>
-                  )}
-                </div>
+              <div className="mt-4 rounded-3xl bg-slate-950/90 p-4 text-slate-300">
+                <p className="text-sm font-semibold text-slate-100">You are being monitored</p>
+                <p className="mt-2 text-sm leading-6 text-slate-400">
+                  This session includes persistent webcam monitoring and live time tracking for exam integrity.
+                </p>
               </div>
             </div>
 
@@ -735,21 +948,34 @@ function App() {
           </aside>
         </main>
 
-        <div className="pointer-events-none fixed top-6 right-6 z-40 w-[320px] rounded-3xl border border-cyan-500/15 bg-slate-950/95 p-4 shadow-[0_20px_70px_rgba(0,0,0,0.45)] backdrop-blur-sm">
-          <div className="relative overflow-hidden rounded-3xl border border-slate-800 bg-slate-900 py-3 px-3">
+        <div className="pointer-events-none fixed top-6 right-6 z-40 w-[400px] rounded-3xl border-2 border-cyan-400 bg-slate-950/98 p-4 shadow-[0_20px_70px_rgba(0,200,255,0.3)] backdrop-blur-sm">
+          <div className="relative overflow-hidden rounded-2xl border border-cyan-500/40 bg-slate-900">
             {webcamActive ? (
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-48 h-36 rounded-lg border-2 border-green-500 object-cover"
-              />
+              <div className="relative">
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  muted
+                  playsInline
+                  className="h-72 w-full object-cover"
+                />
+                <div className="absolute top-3 right-3 inline-flex items-center gap-2 rounded-full bg-emerald-500/90 px-3 py-1.5 text-xs font-semibold text-white">
+                  <span className="h-2 w-2 rounded-full bg-white animate-pulse" />
+                  Live
+                </div>
+              </div>
             ) : (
-              <div className="flex h-36 items-center justify-center text-slate-500">Webcam feed unavailable</div>
+              <div className="flex h-72 items-center justify-center bg-slate-900 text-slate-500">
+                <span>Webcam feed unavailable</span>
+              </div>
             )}
-            <div className="mt-3 rounded-2xl bg-slate-950/90 px-3 py-2 text-sm text-slate-200">
-              <span className="font-semibold text-cyan-300">Live Feed</span> — persistent monitoring active.
+            <div className="border-t border-slate-800 bg-slate-950/90 px-3 py-3">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-300">Webcam Monitoring</p>
+                  <p className="mt-1 text-xs text-slate-400">Continuous frame capture every 3 seconds</p>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -781,7 +1007,7 @@ function App() {
           </div>
         )}
 
-        {renderWarningModal()}
+        <canvas ref={hiddenCanvasRef} className="hidden" />
       </div>
     );
   };
@@ -898,7 +1124,8 @@ function App() {
 
   return (
     <div className="min-h-screen bg-[#020c1b] text-slate-100">
-      {screen === 'login' && renderLoginScreen()}
+      {screen === 'auth' && renderAuthScreen()}
+      {screen === 'verify' && renderVerifyScreen()}
       {screen === 'exam' && renderExamScreen()}
       {screen === 'result' && renderResultScreen()}
     </div>

@@ -1,3 +1,7 @@
 .venv
 mylogs.txt
 .env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd

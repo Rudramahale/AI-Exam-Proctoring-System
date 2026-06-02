@@ -1,29 +1,25 @@
-from datetime import datetime
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status, Header, Depends
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, status, Header, Depends, Form, UploadFile, File
 from fastapi.security import HTTPBearer 
-from models.Violation import Violation
+from sqlalchemy.orm import Session
+from datetime import datetime
+
+from database.connection import SessionLocal
+from schemas.user_schemas import UserCreate, UserLogin, TokenResponse
 from schemas.violation import ViolationCreate
+from schemas.Exam_Schema import EndExamRequest, ExamResultResponse
+from models.user_model import User
+from models.Violation import Violation
 from models.Activity_log import ActivityLog
 from models.Exam_session import ExamSession
 from models.Risk_score import RiskScore
 from api.auth_utils.jwt import hash_password, verify_password, create_access_token
-from database.connection import SessionLocal
-from schemas.user_schemas import UserCreate, UserLogin, TokenResponse, EndExamRequest, ExamResultResponse
-from sqlalchemy.orm import Session
-from models.user_model import User
 from utils.presence_of_person import detect_person
+from utils.violation_code import get_violation_code
+
 
 
 app = FastAPI()
 security = HTTPBearer()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 def get_db():
     session = SessionLocal()
@@ -58,7 +54,7 @@ def signup_user(user : UserCreate, db: Session = Depends(get_db)):
     # Generate JWT token for the new user
     access_token = create_access_token(data={"sub": new_user.email})
     
-    return TokenResponse(access_token=access_token, token_type="bearer", user_id=new_user.id)
+    return TokenResponse(access_token=access_token, token_type="bearer")
 
 @app.post("/login")
 def login_user(user: UserLogin, db: Session = Depends(get_db)):
@@ -74,7 +70,7 @@ def login_user(user: UserLogin, db: Session = Depends(get_db)):
     # Generate JWT token
     access_token = create_access_token(data={"sub": db_user.email})
     
-    return TokenResponse(access_token=access_token, token_type="bearer", user_id=db_user.id)
+    return TokenResponse(access_token=access_token, token_type="bearer")
 
 
 @app.post("/start-exam")
@@ -143,9 +139,11 @@ async def log_violation(violation: ViolationCreate, db: Session = Depends(get_db
     try:
         violation_time = datetime.utcnow()
 
+        violation_code = get_violation_code(violation.violation_type)
+
         violation_record = Violation(
             session_id=violation.session_id,
-            violation_id=violation.violation_id,
+            violation_id=violation_code,
             confidence = 100,
             timestamp = violation_time
         )
@@ -165,64 +163,30 @@ async def log_violation(violation: ViolationCreate, db: Session = Depends(get_db
         raise HTTPException(status_code=500, detail=f"Failed to log violation: {str(e)}")
     
 @app.post("/monitor-frame")
-async def monitor_frame(
-    session_id: int = Form(...),
-    frame: UploadFile = File(...),
-    student_id: int = Form(...),
-    timestamp: str = Form(...),
-    db: Session = Depends(get_db)
-):
+async def monitor_frame(session_id: int = Form(...),photo: UploadFile = File(...),db: Session = Depends(get_db)):
     try:
-        image_bytes = await frame.read()
-        
-        # Verify that the session exists
-        db_session = db.query(ExamSession).filter(ExamSession.id == session_id).first()
-        if not db_session:
-            raise HTTPException(status_code=404, detail="Exam session not found")
-        
-        # Detect person in frame
+        image_bytes = await photo.read()
         result = detect_person(image_bytes)
 
         if result == "No person detected":
             violation_time = datetime.utcnow()
             violation_record = Violation(
                 session_id=session_id,
-                verified="FAILED",
+                verified = "FAILED",
                 student_photo_data=image_bytes
             )
             activity_log = ActivityLog(
                 session_id=session_id,
-                activity=f"Violation detected: No person in frame at {timestamp}",
-                timestamp=violation_time
+                activity=f"Violation detected: No person in frame",
+                timestamp = violation_time
             )
             db.add(violation_record)
             db.add(activity_log)
             db.commit()
-            return {
-                "message": "No person detected. Violation logged.",
-                "session_id": session_id,
-                "student_id": student_id,
-                "frame_timestamp": timestamp
-            }
+            return {"message": "No person detected. Violation logged."}
         else:
-            # Log successful frame capture (optional - only for verbose logging)
-            # You can comment this out if you want to reduce database writes
-            activity_log = ActivityLog(
-                session_id=session_id,
-                activity=f"Frame captured and processed successfully at {timestamp}",
-                timestamp=datetime.utcnow()
-            )
-            db.add(activity_log)
-            db.commit()
-            
-            return {
-                "message": "Person detected. Frame processed successfully.",
-                "session_id": session_id,
-                "student_id": student_id,
-                "frame_timestamp": timestamp
-            }
+            return {"message": "Person detected. No violation."}
     except Exception as e:
-        db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to process frame: {str(e)}")
             
 

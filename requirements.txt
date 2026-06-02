@@ -9,3 +9,8 @@ pydantic
 dotenv
 python-jose[cryptography]
 passlib[bcrypt]
+opencv-python
+mediapipe 
+numpy 
+pillow
+

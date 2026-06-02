@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, LargeBinary
 from database.connection import Base
 from datetime import datetime
 
@@ -14,6 +14,9 @@ class ExamSession(Base):
     end_time = Column(DateTime, nullable=True)
 
     status = Column(String, default="ACTIVE")
+
+    student_photo_data = Column(LargeBinary, nullable=True)
+
 
 # 0-30   = LOW
 # 31-70  = MEDIUM

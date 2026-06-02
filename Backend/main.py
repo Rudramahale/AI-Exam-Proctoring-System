@@ -1,25 +1,22 @@
-from fastapi import FastAPI, HTTPException, status, Header, Depends
+from fastapi import FastAPI, HTTPException, status, Header, Depends, Form, UploadFile, File
 from fastapi.security import HTTPBearer 
-<<<<<<< HEAD
-from api.auth_utils.jwt import hash_password, verify_password,create_access_token
-=======
+from sqlalchemy.orm import Session
+from datetime import datetime
+
+from database.connection import SessionLocal
+from schemas.user_schemas import UserCreate, UserLogin, TokenResponse
+from schemas.violation import ViolationCreate
+from schemas.Exam_Schema import EndExamRequest, ExamResultResponse
+from models.user_model import User
 from models.Violation import Violation
-from Backend.schemas.violation import ViolationCreate
 from models.Activity_log import ActivityLog
 from models.Exam_session import ExamSession
 from models.Risk_score import RiskScore
 from api.auth_utils.jwt import hash_password, verify_password, create_access_token
->>>>>>> f217f0d (Monitor-frame api push)
-from database.connection import SessionLocal
-from schemas.user_schemas import UserCreate, UserLogin, TokenResponse
-from sqlalchemy.orm import Session
-from models.user_model import User
-<<<<<<< HEAD
-from schemas.user_schemas import UserCreate
-=======
 from utils.presence_of_person import detect_person
+from utils.violation_code import get_violation_code
 
->>>>>>> f217f0d (Monitor-frame api push)
+
 
 app = FastAPI()
 security = HTTPBearer()
@@ -75,8 +72,6 @@ def login_user(user: UserLogin, db: Session = Depends(get_db)):
     
     return TokenResponse(access_token=access_token, token_type="bearer")
 
-<<<<<<< HEAD
-=======
 
 @app.post("/start-exam")
 async def start_exam(id: int = Form(...), student_name: str = Form(...), photo: UploadFile = File(...), db: Session = Depends(get_db)):
@@ -144,9 +139,11 @@ async def log_violation(violation: ViolationCreate, db: Session = Depends(get_db
     try:
         violation_time = datetime.utcnow()
 
+        violation_code = get_violation_code(violation.violation_type)
+
         violation_record = Violation(
             session_id=violation.session_id,
-            violation_id=violation.violation_id,
+            violation_id=violation_code,
             confidence = 100,
             timestamp = violation_time
         )
@@ -196,4 +193,3 @@ async def monitor_frame(session_id: int = Form(...),photo: UploadFile = File(...
 
 
 
->>>>>>> f217f0d (Monitor-frame api push)

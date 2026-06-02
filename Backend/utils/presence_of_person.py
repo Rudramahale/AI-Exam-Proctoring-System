@@ -1,6 +1,13 @@
 import cv2
+import numpy as np
 
 def detect_person(image):
+    if isinstance(image, bytes):
+        nparr = np.frombuffer(image, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if image is None:
+            return "No person detected"
+
     face_cascade = cv2.CascadeClassifier(
         cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
     )

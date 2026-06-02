@@ -10,6 +10,6 @@ class Student(Base):
     email = Column(String, nullable = False, unique = True)
     password = Column(String, nullable = False)
     face_image = Column(String, nullable=True)
-    Exam = relationship('exam', back_populates = 'Student')
+    Exam = relationship('Exam', back_populates = 'Student')
 
 print("succsessfully created Student model")

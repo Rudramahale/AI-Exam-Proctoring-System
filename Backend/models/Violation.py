@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, LargeBinary
 from database.connection import Base
 from datetime import datetime
 
@@ -9,11 +9,16 @@ class Violation(Base):
 
     session_id = Column(Integer, ForeignKey("exam_sessions.id"))
 
-    violation_id = Column(Integer)
+    violation_id = Column(Integer, nullable=True)
 
-    confidence = Column(Integer)
+    confidence = Column(Integer, nullable=True)
 
     timestamp = Column(DateTime, default=datetime.utcnow)
+
+    verified = Column(String, nullable=True)
+
+    student_photo_data = Column(LargeBinary, nullable=True)
+
 
 # MULTIPLE_FACE
 # PHONE_DETECTED

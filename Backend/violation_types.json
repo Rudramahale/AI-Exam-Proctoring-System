@@ -1,0 +1,37 @@
+{
+  "VIO_001": {
+    "name": "No Face Detected",
+    "category": "webcam",
+    "risk_weight": 10
+  },
+  "VIO_002": {
+    "name": "Multiple Faces Detected",
+    "category": "webcam",
+    "risk_weight": 20
+  },
+  "VIO_003": {
+    "name": "Mobile Device Detected",
+    "category": "webcam",
+    "risk_weight": 25
+  },
+  "VIO_004": {
+    "name": "Suspicious Head Movement",
+    "category": "webcam",
+    "risk_weight": 15
+  },
+  "VIO_005": {
+    "name": "Tab Switch Detected",
+    "category": "activity",
+    "risk_weight": 20
+  },
+  "VIO_006": {
+    "name": "Camera Blocked",
+    "category": "activity",
+    "risk_weight": 30
+  },
+  "VIO_007": {
+    "name": "Full Screen Exit",
+    "category": "activity",
+    "risk_weight": 15
+  }
+}

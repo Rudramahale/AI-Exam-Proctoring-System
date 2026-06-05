@@ -10,3 +10,4 @@ venv/
 .env/
 .vscode/
 .idea/
+Backend/frames/

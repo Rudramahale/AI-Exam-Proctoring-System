@@ -3,7 +3,9 @@ from fpdf import FPDF
 from datetime import datetime
 
 
-def generate_pdf_report(session_data: dict, output_dir: str = "reports") -> str:
+def generate_pdf_report(session_data: dict, output_dir: str = None) -> str:
+    if output_dir is None:
+        output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "reports")
     os.makedirs(output_dir, exist_ok=True)
     session_id = session_data["session_id"]
     pdf = FPDF()

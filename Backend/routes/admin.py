@@ -1,6 +1,4 @@
-import json
-from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, Header, Query
+from fastapi import APIRouter, Depends, HTTPException, Header, Request, Query
 from sqlalchemy.orm import Session
 from jose import JWTError
 
@@ -10,10 +8,9 @@ from db.schemas import AdminDashboardResponse, SessionInfo, StudentSummary, Acti
 from utils.jwt_utils import decode_access_token
 
 router = APIRouter()
-VT_PATH = Path(__file__).parent.parent / "violation_types.json"
 
 
-def get_admin_from_token(authorization: str = Header(...)) -> User:
+def get_admin_from_token(db: Session = Depends(get_db), authorization: str = Header(...)) -> User:
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid token header")
     token = authorization.split(" ", 1)[1]
@@ -21,49 +18,65 @@ def get_admin_from_token(authorization: str = Header(...)) -> User:
         email = decode_access_token(token)
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    db = next(get_db())
-    try:
-        user = db.query(User).filter(User.email == email).first()
-        if not user or user.role != UserRole.admin:
-            raise HTTPException(status_code=403, detail="Admin access required")
-        return user
-    finally:
-        db.close()
+    user = db.query(User).filter(User.email == email).first()
+    if not user or user.role != UserRole.admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
 
 
 @router.get("/admin", response_model=AdminDashboardResponse)
 def admin_dashboard(db: Session = Depends(get_db), admin: User = Depends(get_admin_from_token)):
-    ongoing_sessions = db.query(ExamSession).filter(ExamSession.status == SessionStatus.ongoing).all()
-    submitted_sessions = db.query(ExamSession).filter(ExamSession.status == SessionStatus.submitted).all()
+    # Fetch user name map in one query
+    user_map = {u.id: u.name for u in db.query(User.id, User.name).all()}
 
-    ongoing = []
-    for s in ongoing_sessions:
-        student = db.query(User).filter(User.id == s.student_id).first()
-        ongoing.append(SessionInfo(
+    # Fetch both session lists in parallel queries (two separate filters instead of one + Python split)
+    ongoing_sessions = (
+        db.query(ExamSession)
+        .filter(ExamSession.status == SessionStatus.ongoing)
+        .all()
+    )
+    submitted_sessions = (
+        db.query(ExamSession)
+        .filter(ExamSession.status == SessionStatus.submitted)
+        .all()
+    )
+
+    # One batch query for all submitted exam scores — avoids N+1
+    submitted_ids = [s.session_id for s in submitted_sessions]
+    sub_map: dict[int, float] = {}
+    if submitted_ids:
+        for sub in db.query(SubmittedExam.session_id, SubmittedExam.score).filter(
+            SubmittedExam.session_id.in_(submitted_ids)
+        ).all():
+            sub_map[sub.session_id] = sub.score
+
+    ongoing = [
+        SessionInfo(
             session_id=s.session_id,
-            student_name=student.name if student else "Unknown",
+            student_name=user_map.get(s.student_id, "Unknown"),
             start_time=s.start_time,
             risk_score=s.risk_score or 0,
-        ))
+        )
+        for s in ongoing_sessions
+    ]
 
-    submitted = []
-    for s in submitted_sessions:
-        student = db.query(User).filter(User.id == s.student_id).first()
-        sub = db.query(SubmittedExam).filter(SubmittedExam.session_id == s.session_id).first()
-        submitted.append(SessionInfo(
+    submitted = [
+        SessionInfo(
             session_id=s.session_id,
-            student_name=student.name if student else "Unknown",
+            student_name=user_map.get(s.student_id, "Unknown"),
             start_time=s.start_time,
             risk_score=s.risk_score or 0,
-            score=sub.score if sub else None,
+            score=sub_map.get(s.session_id),
             report_link=f"/reports/{s.session_id}_report.pdf",
-        ))
+        )
+        for s in submitted_sessions
+    ]
 
     return AdminDashboardResponse(ongoing=ongoing, submitted=submitted)
 
 
 @router.get("/admin/student_summary", response_model=StudentSummary)
-def student_summary(session_id: int = Query(...), db: Session = Depends(get_db), admin: User = Depends(get_admin_from_token)):
+def student_summary(request: Request, session_id: int = Query(...), db: Session = Depends(get_db), admin: User = Depends(get_admin_from_token)):
     session = db.query(ExamSession).filter(ExamSession.session_id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -73,8 +86,8 @@ def student_summary(session_id: int = Query(...), db: Session = Depends(get_db),
     logs = db.query(ActivityLog).filter(ActivityLog.session_id == session_id).order_by(ActivityLog.timestamp).all()
     sub = db.query(SubmittedExam).filter(SubmittedExam.session_id == session_id).first()
 
-    with open(VT_PATH) as f:
-        vt = json.load(f)
+    # Use cached violation types — no disk I/O per request
+    vt = request.app.state.violation_types
 
     vio_list = []
     for v in violations:

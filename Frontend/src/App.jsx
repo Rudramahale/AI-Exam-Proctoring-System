@@ -42,30 +42,110 @@ function App() {
   const [userId, setUserId] = useState(null);
   const [userRole, setUserRole] = useState('');
   const [adminSessions, setAdminSessions] = useState({ ongoing: [], submitted: [] });
+  const [violationAlerts, setViolationAlerts] = useState([]);
+  const [camPos, setCamPos] = useState({ x: null, y: null }); // null = use CSS default until first drag
+  const [submitError, setSubmitError] = useState('');
 
   const videoRef = useRef(null);
   const hiddenCanvasRef = useRef(null);
   const streamRef = useRef(null);
   const frameCaptureIntervalRef = useRef(null);
+  const isSubmittingRef = useRef(false);
+  const dragRef = useRef({ dragging: false, startX: 0, startY: 0, origX: 0, origY: 0 });
+  const answersRef = useRef(answers);
+  const sessionIdRef = useRef(sessionId);
+  const authTokenRef = useRef(authToken);
+  answersRef.current = answers;
+  sessionIdRef.current = sessionId;
+  authTokenRef.current = authToken;
 
   useEffect(() => () => { streamRef.current?.getTracks().forEach(t => t.stop()); frameCaptureIntervalRef.current && clearInterval(frameCaptureIntervalRef.current); }, []);
 
   useEffect(() => {
+    if (videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+    }
+  }, [screen, webcamActive]);
+
+  const VIOLATION_NAMES = {
+    VIO_001: 'No Face Detected',
+    VIO_002: 'Multiple Faces Detected',
+    VIO_003: 'Mobile Device Detected',
+    VIO_004: 'Suspicious Head Movement',
+    VIO_005: 'Tab Switch Detected',
+    VIO_006: 'Camera Blocked',
+    VIO_007: 'Full Screen Exit',
+  };
+
+  const showAlert = (v_type_id) => {
+    const name = VIOLATION_NAMES[v_type_id] || v_type_id;
+    const id = Date.now();
+    setViolationAlerts(p => [...p, { id, v_type_id, name }]);
+    setTimeout(() => setViolationAlerts(p => p.filter(a => a.id !== id)), 4000);
+  };
+
+  const reportViolation = async (v_type_id) => {
+    const sid = sessionIdRef.current;
+    const tok = authTokenRef.current;
+    if (!sid || !tok) return;
+    showAlert(v_type_id);
+    try {
+      await fetch(`${API_BASE}/violation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+        body: JSON.stringify({ session_id: sid, v_type_id, image_path: '' }),
+      });
+    } catch (e) { console.warn('Violation report failed', e); }
+  };
+
+  useEffect(() => {
     if (screen !== 'exam') return;
-    const handleKeyDown = (e) => { if ((e.ctrlKey && ['c', 'v', 'x'].includes(e.key.toLowerCase())) || (e.altKey && e.key === 'Tab')) e.preventDefault(); };
-    const handleContextMenu = (e) => e.preventDefault();
-    const handleFullscreenChange = () => setFullscreenWarning(!document.fullscreenElement);
+    const handleKeyDown = (e) => {
+      if ((e.ctrlKey && ['c', 'v', 'x'].includes(e.key.toLowerCase())) || (e.altKey && e.key === 'Tab')) {
+        e.preventDefault();
+        reportViolation('VIO_005');
+      }
+    };
+    const handleContextMenu = (e) => { e.preventDefault(); reportViolation('VIO_005'); };
+    const handleFullscreenChange = () => {
+      const fs = !document.fullscreenElement;
+      setFullscreenWarning(fs);
+      if (fs && !isSubmittingRef.current) reportViolation('VIO_007');
+    };
+    const handleVisibilityChange = () => { if (document.hidden) reportViolation('VIO_005'); };
+    const handleWindowBlur = () => {
+      // window.blur fires when the ENTIRE window loses focus (Alt+Tab, Win+Tab).
+      // Small delay so document.hidden has settled before we check it.
+      setTimeout(() => {
+        if (document.hidden && !isSubmittingRef.current) reportViolation('VIO_005');
+      }, 100);
+    };
     document.addEventListener('keydown', handleKeyDown);
     document.addEventListener('contextmenu', handleContextMenu);
     document.addEventListener('fullscreenchange', handleFullscreenChange);
-    return () => { document.removeEventListener('keydown', handleKeyDown); document.removeEventListener('contextmenu', handleContextMenu); document.removeEventListener('fullscreenchange', handleFullscreenChange); };
-  }, [screen]);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('blur', handleWindowBlur);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('contextmenu', handleContextMenu);
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('blur', handleWindowBlur);
+    };
+  }, [screen, sessionId, authToken]);
 
   useEffect(() => {
     if (screen !== 'exam' || submissionComplete) return;
-    const interval = setInterval(() => { setSecondsLeft(p => { if (p <= 1) { handleFinalSubmission(true); return 0; } return p - 1; }); }, 1000);
+    const interval = setInterval(() => {
+      setSecondsLeft(p => { if (p <= 1) return 0; return p - 1; });
+    }, 1000);
     return () => clearInterval(interval);
   }, [screen, submissionComplete]);
+
+  useEffect(() => {
+    if (screen !== 'exam' || submissionComplete || secondsLeft > 0) return;
+    handleFinalSubmission(true);
+  }, [secondsLeft, screen, submissionComplete]);
 
   useEffect(() => {
     if (screen !== 'exam' || submissionComplete || !webcamActive || !sessionId) {
@@ -119,10 +199,26 @@ function App() {
   };
 
   const captureAndSendFrame = async () => {
-    if (!videoRef.current || !hiddenCanvasRef.current || !sessionId) return;
+    const sid = sessionIdRef.current;
+    const tok = authTokenRef.current;
+    if (!videoRef.current || !hiddenCanvasRef.current || !sid) return;
+
+    // ── Layer 1: Check browser video track state ─────────────────────────────
+    // When the user turns the camera off via OS/browser, the track readyState
+    // changes to 'ended' or 'muted'. We detect this BEFORE capturing a frame,
+    // because a dead track still shows the last frozen frame in the <video>
+    // element — pixel analysis alone would not catch it.
+    const tracks = streamRef.current?.getVideoTracks() ?? [];
+    const trackLive = tracks.length > 0 && tracks[0].readyState === 'live' && !tracks[0].muted;
+    if (!trackLive && tracks.length > 0) {
+      // Camera was turned off externally — report VIO_006 directly
+      reportViolation('VIO_006');
+      return;
+    }
+
     try {
       const canvas = hiddenCanvasRef.current;
-      canvas.width = videoRef.current.videoWidth || 640;
+      canvas.width  = videoRef.current.videoWidth  || 640;
       canvas.height = videoRef.current.videoHeight || 480;
       canvas.getContext('2d').drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
       canvas.toBlob(async (blob) => {
@@ -130,15 +226,49 @@ function App() {
         try {
           const fd = new FormData();
           fd.append('photo', blob, 'frame.jpg');
-          fd.append('session_id', String(sessionId));
-          await fetch(`${API_BASE}/monitor-frame`, { method: 'POST', body: fd, headers: authToken ? { Authorization: `Bearer ${authToken}` } : {} });
-        } catch {}
+          fd.append('session_id', String(sid));
+          const res = await fetch(`${API_BASE}/monitor-frame`, { method: 'POST', body: fd, headers: tok ? { Authorization: `Bearer ${tok}` } : {} });
+          const data = await res.json();
+          // ── Layer 2: Backend darkness check catches physical lens covers ──
+          if      (data.detection === 'camera_blocked')           showAlert('VIO_006');
+          else if (data.detection === 'no_face')                  showAlert('VIO_001');
+          else if (data.detection === 'multiple_faces')           showAlert('VIO_002');
+          else if (data.detection === 'suspicious_head_movement') showAlert('VIO_004');
+        } catch (e) { console.warn('Frame send failed', e); }
       }, 'image/jpeg', 0.8);
-    } catch {}
+    } catch (e) { console.warn('Frame capture failed', e); }
   };
+
+  const enterFullscreen = () => new Promise((resolve, reject) => {
+    if (document.fullscreenElement) { resolve(); return; }
+    let done = false;
+    const cleanup = () => {
+      done = true;
+      document.removeEventListener('fullscreenchange', onChange);
+      document.removeEventListener('fullscreenerror', onError);
+    };
+    const onChange = () => {
+      if (document.fullscreenElement) { cleanup(); resolve(); }
+    };
+    const onError = () => { cleanup(); reject(new Error('fullscreenerror')); };
+    document.addEventListener('fullscreenchange', onChange);
+    document.addEventListener('fullscreenerror', onError);
+    const p = document.documentElement.requestFullscreen();
+    if (p && p.catch) p.catch(e => { if (!done) { cleanup(); reject(e); } });
+    setTimeout(() => { if (!done) { cleanup(); reject(new Error('fullscreen_timeout')); } }, 3000);
+  });
 
   const handleStartExam = async () => {
     if (!student.photo) { setLoginError('Capture a photo first.'); return; }
+
+    // Fullscreen gate — must enter fullscreen before we even try the API
+    try {
+      await enterFullscreen();
+    } catch {
+      setLoginError('Fullscreen is required to start the exam. Please allow fullscreen and try again.');
+      return;
+    }
+
     setSubmitLoading(true); setLoginError('');
     try {
       const res = await fetch(`${API_BASE}/start_exam`, {
@@ -147,34 +277,58 @@ function App() {
         body: JSON.stringify({ student_photo: student.photo }),
       });
       const data = await res.json();
-      if (!res.ok) { setLoginError(data.detail || 'Cannot start exam.'); return; }
+      if (!res.ok) { setLoginError(data.detail || 'Cannot start exam.'); setSubmitLoading(false); return; }
       setSessionId(data.session_id);
       setExamStartTime(data.start_time);
       setStudent(p => ({ ...p, loginTime: formatDateTime(new Date(data.start_time)) }));
       setSecondsLeft(15 * 60);
       setFullscreenWarning(false);
       setScreen('exam');
-      document.documentElement.requestFullscreen().catch(() => setFullscreenWarning(true));
     } catch { setLoginError('Cannot reach backend.'); }
     finally { setSubmitLoading(false); }
   };
 
   const handleFinalSubmission = async (auto = false) => {
+    // First click from exam screen — open the confirm modal
     if (!auto && !showSubmitModal) { setShowSubmitModal(true); return; }
+    // Guard against double-clicks while a request is in-flight
+    if (isSubmittingRef.current) return;
+    setSubmitError('');
+    setSubmitLoading(true);
     frameCaptureIntervalRef.current && clearInterval(frameCaptureIntervalRef.current);
-    const score = answers.reduce((t, a, i) => t + (a === questions[i].correct ? 1 : 0), 0);
-    const answersObj = Object.fromEntries(answers.map((a, i) => [i, a !== null ? a : null]));
+    const ans = answersRef.current;
+    const sid = sessionIdRef.current;
+    const tok = authTokenRef.current;
+    const score = ans.reduce((t, a, i) => t + (a === questions[i].correct ? 1 : 0), 0);
+    const answersObj = Object.fromEntries(ans.map((a, i) => [i, a !== null ? a : null]));
     setResultScore(score);
+    isSubmittingRef.current = true;
+    const endTime = new Date().toISOString();
+    try {
+      const res = await fetch(`${API_BASE}/end_exam`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+        body: JSON.stringify({ session_id: sid, answers: answersObj, score }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        setSubmitError(errData.detail || `Submission failed (${res.status}). Please try again.`);
+        isSubmittingRef.current = false;
+        setSubmitLoading(false);
+        return;
+      }
+    } catch (e) {
+      setSubmitError('Cannot reach backend. Your answers are saved. Please try again.');
+      isSubmittingRef.current = false;
+      setSubmitLoading(false);
+      return;
+    }
+    // Success path
+    setExamEndTime(endTime);
     setSubmissionComplete(true);
     setShowSubmitModal(false);
-    document.fullscreenElement && document.exitFullscreen().catch(() => {});
-    try {
-      await fetch(`${API_BASE}/end_exam`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
-        body: JSON.stringify({ session_id: sessionId, answers: answersObj, score }),
-      });
-    } catch {}
+    isSubmittingRef.current = false;
+    setSubmitLoading(false);
     setScreen('result');
   };
 
@@ -289,6 +443,13 @@ function App() {
     return (
       <div className="relative min-h-screen overflow-hidden bg-[#031328] px-4 py-6 sm:px-6 lg:px-8">
         {fullscreenWarning && <div className="fixed inset-x-0 top-0 z-50 border-b border-rose-500/30 bg-rose-950/95 p-4 text-sm text-rose-100 shadow-lg shadow-black/40"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><span>Please return to fullscreen mode.</span><button type="button" onClick={() => document.documentElement.requestFullscreen().catch(() => {})} className="rounded-2xl bg-rose-500 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-rose-400">Re-enter Fullscreen</button></div></div>}
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 pointer-events-none">
+          {violationAlerts.map(a => (
+            <div key={a.id} className="rounded-2xl border border-rose-500/40 bg-rose-950/95 px-5 py-3 text-sm text-rose-100 shadow-lg shadow-black/40 animate-bounce pointer-events-auto">
+              <span className="font-semibold">Violation:</span> {a.name}
+            </div>
+          ))}
+        </div>
         <header className="mb-8 rounded-[2rem] border border-cyan-500/10 bg-slate-950/90 p-6 shadow-[0_35px_90px_rgba(0,0,0,0.45)] backdrop-blur-sm">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
             <div className="space-y-3">
@@ -326,13 +487,90 @@ function App() {
             <div className="rounded-3xl border border-slate-700/60 bg-slate-900/95 p-4"><p className="text-xs uppercase tracking-[0.3em] text-cyan-300">Navigator</p><div className="mt-4 grid grid-cols-5 gap-3">{questions.map((_, idx) => { const st = answers[idx] === null ? 'unset' : 'answered'; return (<button key={idx} type="button" onClick={() => setCurrentQuestion(idx)} className={`rounded-2xl px-3 py-2 text-xs font-semibold transition ${idx === currentQuestion ? 'bg-cyan-500 text-slate-950 ring-2 ring-cyan-400' : st === 'answered' ? 'bg-cyan-500/20 text-cyan-200 hover:bg-cyan-500/30' : 'bg-slate-900 text-slate-500 hover:bg-slate-800'}`}>Q{idx + 1}</button>); })}</div></div>
           </aside>
         </main>
-        <div className="pointer-events-none fixed top-6 right-6 z-40 w-[400px] rounded-3xl border-2 border-cyan-400 bg-slate-950/98 p-4 shadow-[0_20px_70px_rgba(0,200,255,0.3)] backdrop-blur-sm">
-          <div className="relative overflow-hidden rounded-2xl border border-cyan-500/40 bg-slate-900">
-            {webcamActive ? <div className="relative"><video ref={videoRef} autoPlay muted playsInline className="h-72 w-full object-cover" /><div className="absolute top-3 right-3 inline-flex items-center gap-2 rounded-full bg-emerald-500/90 px-3 py-1.5 text-xs font-semibold text-white"><span className="h-2 w-2 rounded-full bg-white animate-pulse" />Live</div></div> : <div className="flex h-72 items-center justify-center bg-slate-900 text-slate-500">Feed unavailable</div>}
-            <div className="border-t border-slate-800 bg-slate-950/90 px-3 py-3"><div className="flex items-center justify-between gap-2"><div><p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-300">Webcam Monitoring</p><p className="mt-1 text-xs text-slate-400">Frame capture every 3s</p></div></div></div>
+        <div
+          className="fixed z-40 w-[340px] rounded-3xl border-2 border-cyan-400 bg-slate-950/98 shadow-[0_20px_70px_rgba(0,200,255,0.3)] backdrop-blur-sm select-none overflow-hidden"
+          style={camPos.x !== null ? { top: camPos.y + 'px', left: camPos.x + 'px' } : { bottom: '24px', right: '24px' }}
+        >
+          {/* ── Drag handle (top bar) ── */}
+          <div
+            className="flex items-center justify-between gap-2 border-b border-cyan-500/20 bg-slate-900/90 px-4 py-2.5 cursor-grab active:cursor-grabbing"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              const dr = dragRef.current;
+              const el = e.currentTarget.closest('.fixed');
+              const rect = el.getBoundingClientRect();
+              dr.dragging = true;
+              dr.startX = e.clientX;
+              dr.startY = e.clientY;
+              dr.origX = rect.left;
+              dr.origY = rect.top;
+              const handleMouseMove = (mv) => {
+                if (!dr.dragging) return;
+                const nx = dr.origX + (mv.clientX - dr.startX);
+                const ny = dr.origY + (mv.clientY - dr.startY);
+                setCamPos({ x: Math.max(0, nx), y: Math.max(0, ny) });
+              };
+              const handleMouseUp = () => {
+                dr.dragging = false;
+                document.removeEventListener('mousemove', handleMouseMove);
+                document.removeEventListener('mouseup', handleMouseUp);
+              };
+              document.addEventListener('mousemove', handleMouseMove);
+              document.addEventListener('mouseup', handleMouseUp);
+            }}
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-base leading-none text-slate-400 tracking-widest">⠿⠿</span>
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-300">Webcam Monitor</p>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="text-xs text-slateald-400 text-slate-400">Live</span>
+            </div>
+          </div>
+          {/* ── Video feed ── */}
+          <div className="relative overflow-hidden bg-slate-900">
+            {webcamActive
+              ? <video ref={videoRef} autoPlay muted playsInline className="h-52 w-full object-cover" />
+              : <div className="flex h-52 items-center justify-center bg-slate-900 text-slate-500 text-sm">Feed unavailable</div>
+            }
+          </div>
+          {/* ── Footer info ── */}
+          <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-2">
+            <p className="text-xs text-slate-500 text-center">Frame capture every 3s · drag header to move</p>
           </div>
         </div>
-        {showSubmitModal && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-6 backdrop-blur-sm"><div className="w-full max-w-xl rounded-[2rem] border border-cyan-500/20 bg-slate-900/95 p-8 shadow-[0_30px_90px_rgba(0,0,0,0.6)]"><h2 className="text-2xl font-semibold text-slate-100">Confirm submission</h2><p className="mt-4 text-slate-300">Are you sure? You cannot return after submission.</p><div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end"><button type="button" onClick={() => setShowSubmitModal(false)} className="rounded-3xl border border-slate-700/80 bg-slate-950 px-5 py-3 text-sm font-semibold text-slate-200 transition hover:border-cyan-500/40">Cancel</button><button type="button" onClick={() => handleFinalSubmission(true)} className="rounded-3xl bg-cyan-500 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400">Submit</button></div></div></div>}
+        {showSubmitModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-6 backdrop-blur-sm">
+            <div className="w-full max-w-xl rounded-[2rem] border border-cyan-500/20 bg-slate-900/95 p-8 shadow-[0_30px_90px_rgba(0,0,0,0.6)]">
+              <h2 className="text-2xl font-semibold text-slate-100">Confirm submission</h2>
+              <p className="mt-4 text-slate-300">Are you sure? You cannot return after submission.</p>
+              {submitError && (
+                <div className="mt-4 rounded-2xl border border-rose-500/30 bg-rose-950/60 px-4 py-3">
+                  <p className="text-sm text-rose-300">⚠ {submitError}</p>
+                </div>
+              )}
+              <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  onClick={() => { setShowSubmitModal(false); setSubmitError(''); }}
+                  disabled={submitLoading}
+                  className="rounded-3xl border border-slate-700/80 bg-slate-950 px-5 py-3 text-sm font-semibold text-slate-200 transition hover:border-cyan-500/40 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleFinalSubmission(true)}
+                  disabled={submitLoading}
+                  className="rounded-3xl bg-cyan-500 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:opacity-60"
+                >
+                  {submitLoading ? 'Submitting…' : submitError ? 'Try Again' : 'Submit'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         <canvas ref={hiddenCanvasRef} className="hidden" />
       </div>
     );
@@ -375,7 +613,7 @@ function App() {
     fetch(`${API_BASE}/admin`, { headers: { Authorization: `Bearer ${authToken}` } })
       .then(r => r.json())
       .then(d => setAdminSessions(d))
-      .catch(() => {});
+      .catch((e) => console.warn('Admin fetch failed', e));
   }, [screen, authToken]);
 
   const renderAdminScreen = () => (

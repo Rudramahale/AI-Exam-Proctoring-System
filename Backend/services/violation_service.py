@@ -1,7 +1,7 @@
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from db.models import Violation, Screenshot, ActivityLog, ExamSession
+from db.models import Violation, Screenshot, ActivityLog, ExamSession, SessionStatus
 
 
 def report_violation(
@@ -21,6 +21,8 @@ def report_violation(
     session = db.query(ExamSession).filter(ExamSession.session_id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Exam session not found")
+    if session.status != SessionStatus.ongoing:
+        raise HTTPException(status_code=400, detail="Exam session is not ongoing")
 
     violation = Violation(session_id=session_id, v_type_id=v_type_id)
     db.add(violation)

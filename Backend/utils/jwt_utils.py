@@ -31,3 +31,13 @@ def decode_access_token(token: str) -> str:
         return email
     except JWTError as e:
         raise JWTError(f"Token decode error: {str(e)}")
+
+
+def decode_token_full(token: str) -> dict:
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("sub") is None:
+            raise JWTError("Invalid token: missing subject")
+        return payload
+    except JWTError as e:
+        raise JWTError(f"Token decode error: {str(e)}")

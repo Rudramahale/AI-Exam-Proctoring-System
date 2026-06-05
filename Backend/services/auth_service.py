@@ -16,7 +16,7 @@ def signup(db: Session, name: str, email: str, password: str, role: str) -> dict
     db.commit()
     db.refresh(user)
 
-    token = create_access_token(data={"sub": user.email, "role": user.role.value})
+    token = create_access_token(data={"sub": user.email, "role": user.role.value, "user_id": user.id})
     return {
         "message": "User created",
         "user_id": user.id,
@@ -30,7 +30,7 @@ def login(db: Session, email: str, password: str) -> dict:
     if not user or not verify_password(password, user.password):
         raise HTTPException(status_code=400, detail="Invalid email or password")
 
-    token = create_access_token(data={"sub": user.email, "role": user.role.value})
+    token = create_access_token(data={"sub": user.email, "role": user.role.value, "user_id": user.id})
     return {"access_token": token, "token_type": "bearer", "user_id": user.id, "role": user.role.value}
 
 

@@ -29,6 +29,8 @@ def end_exam(db: Session, session_id: int, student_id: int, answers: dict = None
     ).first()
     if not session:
         raise HTTPException(status_code=404, detail="Exam session not found")
+    if session.status == SessionStatus.submitted:
+        raise HTTPException(status_code=400, detail="Exam already submitted")
 
     session.status = SessionStatus.submitted
     session.end_time = datetime.utcnow()
